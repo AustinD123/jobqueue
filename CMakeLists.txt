@@ -47,3 +47,21 @@ target_link_libraries(claim_race_test PRIVATE
 )
 
 add_test(NAME claim_race_test COMMAND claim_race_test)
+
+# Broker: plain POSIX sockets, Linux-only scope by design (see
+# src/broker.cpp) -- guarded so `cmake configure` still succeeds on
+# non-Unix dev machines that don't have nlohmann_json installed and
+# aren't building this target anyway.
+if(UNIX)
+    find_package(nlohmann_json REQUIRED)
+
+    add_executable(broker
+        src/broker.cpp
+        src/broker_main.cpp
+        src/dispatch.cpp
+    )
+    target_link_libraries(broker PRIVATE
+        jobqueue_engine
+        nlohmann_json::nlohmann_json
+    )
+endif()
