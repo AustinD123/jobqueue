@@ -74,11 +74,35 @@ ctest --test-dir build
 `Engine` is linked against SQLite via `pkg-config` — no amalgamation is
 vendored.
 
+The broker (`broker` target, `tools/`) is POSIX-socket code with no
+Windows path by design, and is gated behind `if(UNIX)` in
+`CMakeLists.txt`. Build and run it on Linux/WSL:
+
+```sh
+./build/broker <port> [db_path]
+python3 tools/send.py '{"cmd":"enqueue","queue":"default","payload":"hi","priority":0}' <port>
+python3 tools/integration_check.py --port <port>          # full lifecycle check
+python3 tools/integration_check.py --port <port> --max-attempts 5   # DLQ path
+```
+
 ## Status
 
 - [x] **Day 1** — core engine: `enqueue`, `claim`, `ack`, `nack`,
       `reap_expired_leases`, `stats`, all implemented over the SQLite C API
       and manually verified against real (non-mocked) SQLite databases.
-- [ ] **Day 2** — concurrency test proving `claim()` is race-free under
-      real threads, plus a background-timer lease reaper.
-- [ ] Networking, CLI, and benchmarks (`cli/`, `bench/`).
+- [x] **Day 2** — `claim_race_test` proves `claim()` is race-free under
+      real threads (verified clean at 2/8/32 threads); `LeaseReaper` runs
+      `reap_expired_leases()` on a background, interruptibly-sleeping
+      thread. Also found and fixed two real bugs this surfaced: a pragma
+      ordering issue causing intermittent "database is locked" under
+      concurrent connection setup, and duplicated Dead-vs-Ready+backoff
+      logic between `nack()` and `reap_expired_leases()` (extracted into
+      `transition_after_failure()`).
+- [x] **Day 3** — `Broker`: newline-delimited JSON over TCP, one
+      connection-per-thread `Engine`, `dispatch()` routing
+      enqueue/claim/ack/nack/stats. `tools/send.py` for manual protocol
+      testing, `tools/integration_check.py` for an automated
+      enqueue→claim→ack/nack→stats lifecycle check (including the DLQ
+      path) against a running broker — verified 20/20 passing over real
+      TCP connections.
+- [ ] CLI worker/producer client, benchmarks (`cli/`, `bench/`).

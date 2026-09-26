@@ -8,6 +8,16 @@
 
 namespace jobqueue {
 
+const char* to_string(JobStatus status) {
+    switch (status) {
+        case JobStatus::Ready:  return "ready";
+        case JobStatus::Leased: return "leased";
+        case JobStatus::Done:   return "done";
+        case JobStatus::Dead:   return "dead";
+    }
+    throw std::logic_error("unknown JobStatus");
+}
+
 Engine::Engine(const std::string& db_path, RetryPolicy policy)
     : db_(nullptr), policy_(policy) {
     if (sqlite3_open(db_path.c_str(), &db_) != SQLITE_OK) {

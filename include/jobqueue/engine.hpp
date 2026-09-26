@@ -8,6 +8,8 @@ namespace jobqueue {
 
 enum class JobStatus { Ready, Leased, Done, Dead };
 
+const char* to_string(JobStatus status);
+
 struct Job {
     int64_t id;
     std::string queue;
