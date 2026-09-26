@@ -15,6 +15,15 @@ Engine::Engine(const std::string& db_path, RetryPolicy policy)
         sqlite3_close(db_);
         throw std::runtime_error("Failed to open database: " + err);
     }
+    // busy_timeout must be set FIRST: it controls what happens when this
+    // connection can't get the write lock. Set it before journal_mode/
+    // synchronous, or those two pragmas have no retry/wait behavior yet
+    // and can throw immediately under concurrent connection setup.
+    if (sqlite3_exec(db_, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        std::string err = sqlite3_errmsg(db_);
+        sqlite3_close(db_);
+        throw std::runtime_error("Failed to set busy_timeout: " + err);
+    }
     if (sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr) != SQLITE_OK) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_close(db_);
@@ -24,11 +33,6 @@ Engine::Engine(const std::string& db_path, RetryPolicy policy)
         std::string err = sqlite3_errmsg(db_);
         sqlite3_close(db_);
         throw std::runtime_error("Failed to set synchronous: " + err);
-    }
-    if (sqlite3_exec(db_, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        std::string err = sqlite3_errmsg(db_);
-        sqlite3_close(db_);
-        throw std::runtime_error("Failed to set busy_timeout: " + err);
     }
     const char* schema_sql =
         "CREATE TABLE IF NOT EXISTS jobs ("
@@ -199,14 +203,26 @@ bool Engine::nack(int64_t job_id) {
     const int attempts = sqlite3_column_int(select_stmt, 0);
     sqlite3_finalize(select_stmt);
 
-    // Step 2: branch on attempts (already incremented back in claim()) vs
-    // the retry policy, and apply the matching UPDATE. Both branches keep
-    // the same "AND status = Leased" ownership guard as ack().
+    // Branch on attempts (already incremented back in claim()) vs the
+    // retry policy, and apply the matching UPDATE -- shared with
+    // reap_expired_leases(), which faces the exact same decision for a
+    // batch of rows instead of one.
+    return transition_after_failure(job_id, attempts);
+}
+
+// Applies the Dead-vs-Ready+backoff decision to a single row that the
+// caller has already confirmed is (or was) Leased -- shared by nack()
+// (one ownership-checked row) and reap_expired_leases() (a batch of
+// expired rows). Both branches keep the "AND status = Leased" guard, so a
+// row that moved out of Leased between the caller's read and this UPDATE
+// (e.g. raced by a late ack(), or by the reaper) safely no-ops instead of
+// stomping on it -- caught via sqlite3_changes(), same as ack().
+bool Engine::transition_after_failure(int64_t job_id, int current_attempts) {
     sqlite3_stmt* update_stmt = nullptr;
-    if (attempts >= policy_.max_attempts) {
+    if (current_attempts >= policy_.max_attempts) {
         const char* dead_sql = "UPDATE jobs SET status = ? WHERE id = ? AND status = ?;";
         if (sqlite3_prepare_v2(db_, dead_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
-            throw std::runtime_error("Failed to prepare nack(dead) statement: " +
+            throw std::runtime_error("Failed to prepare dead-transition statement: " +
                                       std::string(sqlite3_errmsg(db_)));
         }
         sqlite3_bind_int(update_stmt, 1, static_cast<int>(JobStatus::Dead));
@@ -216,11 +232,11 @@ bool Engine::nack(int64_t job_id) {
         const char* retry_sql =
             "UPDATE jobs SET status = ?, run_after = ? WHERE id = ? AND status = ?;";
         if (sqlite3_prepare_v2(db_, retry_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
-            throw std::runtime_error("Failed to prepare nack(retry) statement: " +
+            throw std::runtime_error("Failed to prepare retry-transition statement: " +
                                       std::string(sqlite3_errmsg(db_)));
         }
         sqlite3_bind_int(update_stmt, 1, static_cast<int>(JobStatus::Ready));
-        sqlite3_bind_int64(update_stmt, 2, now_ms() + backoff_for_attempt(attempts));
+        sqlite3_bind_int64(update_stmt, 2, now_ms() + backoff_for_attempt(current_attempts));
         sqlite3_bind_int64(update_stmt, 3, job_id);
         sqlite3_bind_int(update_stmt, 4, static_cast<int>(JobStatus::Leased));
     }
@@ -228,7 +244,7 @@ bool Engine::nack(int64_t job_id) {
     if (sqlite3_step(update_stmt) != SQLITE_DONE) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_finalize(update_stmt);
-        throw std::runtime_error("Failed to update job in nack: " + err);
+        throw std::runtime_error("Failed to apply failure transition: " + err);
     }
 
     const bool changed = sqlite3_changes(db_) > 0;
@@ -259,42 +275,14 @@ int Engine::reap_expired_leases() {
     sqlite3_finalize(select_stmt);
 
     // Step 2: apply the same Dead-vs-Ready+backoff branch as nack(), one
-    // UPDATE per row, each still guarded by "AND status = Leased" in case
-    // the original worker's late ack()/nack() beat us to this row.
+    // row at a time, via the shared transition_after_failure() helper --
+    // still guarded by "AND status = Leased" in case the original
+    // worker's late ack()/nack() beat us to a given row.
     int count = 0;
     for (const auto& [id, attempts] : expired) {
-        sqlite3_stmt* update_stmt = nullptr;
-        if (attempts >= policy_.max_attempts) {
-            const char* dead_sql = "UPDATE jobs SET status = ? WHERE id = ? AND status = ?;";
-            if (sqlite3_prepare_v2(db_, dead_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
-                throw std::runtime_error("Failed to prepare reap(dead) statement: " +
-                                          std::string(sqlite3_errmsg(db_)));
-            }
-            sqlite3_bind_int(update_stmt, 1, static_cast<int>(JobStatus::Dead));
-            sqlite3_bind_int64(update_stmt, 2, id);
-            sqlite3_bind_int(update_stmt, 3, static_cast<int>(JobStatus::Leased));
-        } else {
-            const char* retry_sql =
-                "UPDATE jobs SET status = ?, run_after = ? WHERE id = ? AND status = ?;";
-            if (sqlite3_prepare_v2(db_, retry_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
-                throw std::runtime_error("Failed to prepare reap(retry) statement: " +
-                                          std::string(sqlite3_errmsg(db_)));
-            }
-            sqlite3_bind_int(update_stmt, 1, static_cast<int>(JobStatus::Ready));
-            sqlite3_bind_int64(update_stmt, 2, now_ms() + backoff_for_attempt(attempts));
-            sqlite3_bind_int64(update_stmt, 3, id);
-            sqlite3_bind_int(update_stmt, 4, static_cast<int>(JobStatus::Leased));
-        }
-
-        if (sqlite3_step(update_stmt) != SQLITE_DONE) {
-            std::string err = sqlite3_errmsg(db_);
-            sqlite3_finalize(update_stmt);
-            throw std::runtime_error("Failed to update job in reap: " + err);
-        }
-        if (sqlite3_changes(db_) > 0) {
+        if (transition_after_failure(id, attempts)) {
             ++count;
         }
-        sqlite3_finalize(update_stmt);
     }
 
     return count;

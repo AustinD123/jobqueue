@@ -7,9 +7,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3>=3.35)
+find_package(Threads REQUIRED)
 
 add_library(jobqueue_engine STATIC
     src/engine.cpp
+    src/reaper.cpp
 )
 target_include_directories(jobqueue_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -19,6 +21,7 @@ target_include_directories(jobqueue_engine PRIVATE
 )
 target_link_libraries(jobqueue_engine PUBLIC
     ${SQLITE3_LIBRARIES}
+    Threads::Threads
 )
 target_compile_options(jobqueue_engine PRIVATE
     ${SQLITE3_CFLAGS_OTHER}
@@ -34,3 +37,13 @@ target_link_libraries(engine_tests PRIVATE
 )
 
 add_test(NAME engine_tests COMMAND engine_tests)
+
+add_executable(claim_race_test
+    tests/claim_race_test.cpp
+)
+target_link_libraries(claim_race_test PRIVATE
+    jobqueue_engine
+    Threads::Threads
+)
+
+add_test(NAME claim_race_test COMMAND claim_race_test)

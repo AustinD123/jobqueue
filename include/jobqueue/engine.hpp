@@ -48,6 +48,7 @@ private:
     RetryPolicy policy_;
     int64_t now_ms() const;
     int64_t backoff_for_attempt(int attempt) const;
+    bool transition_after_failure(int64_t job_id, int current_attempts);
 };
 
 }  // namespace jobqueue
