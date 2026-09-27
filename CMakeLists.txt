@@ -64,4 +64,17 @@ if(UNIX)
         jobqueue_engine
         nlohmann_json::nlohmann_json
     )
+
+    add_executable(worker
+        src/worker_main.cpp
+        src/worker.cpp
+        src/client_conn.cpp
+    )
+    target_include_directories(worker PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(worker PRIVATE
+        nlohmann_json::nlohmann_json
+        Threads::Threads
+    )
 endif()
