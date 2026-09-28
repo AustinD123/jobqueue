@@ -2,6 +2,8 @@
 #include "jobqueue/dispatch.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -14,14 +16,41 @@
 
 namespace jobqueue {
 
+namespace {
+
+std::chrono::milliseconds reap_interval_from_env() {
+    const char* env = std::getenv("JQ_REAP_MS");
+    long ms = 5000;
+    if (env != nullptr) {
+        char* end = nullptr;
+        long parsed = std::strtol(env, &end, 10);
+        if (end != env && parsed > 0) {
+            ms = parsed;
+        }
+    }
+    return std::chrono::milliseconds(ms);
+}
+
+}  // namespace
+
 Broker::Broker(std::string db_path, uint16_t port, RetryPolicy policy)
     : db_path_(std::move(db_path)),
       port_(port),
       policy_(policy),
       listen_fd_(-1),
-      running_(false) {}
+      running_(false),
+      // db_path_ and policy_ are declared (and therefore initialized)
+      // before reaper_, so both are already valid here regardless of
+      // initializer-list order.
+      reaper_(db_path_, reap_interval_from_env(), policy_) {}
+
+Broker::~Broker() {
+    reaper_.stop();
+}
 
 void Broker::run() {
+    reaper_.start();
+
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
         throw std::runtime_error(std::string("socket() failed: ") + std::strerror(errno));
@@ -62,10 +91,15 @@ void Broker::run() {
 }
 
 void Broker::stop() {
-    // Both operations here (an atomic store and close()) are
-    // async-signal-safe, so this is safe to call directly from a signal
-    // handler (e.g. SIGINT/SIGTERM), not just from another thread.
+    // NOTE: this used to be safe to call directly from a signal handler
+    // (running_ = false plus close() are both async-signal-safe). That
+    // guarantee no longer holds now that this also calls reaper_.stop(),
+    // which internally does condition_variable::notify_all() and
+    // thread::join() -- neither is on the async-signal-safe list. Call
+    // this from a normal thread, not a signal handler, until/unless that
+    // gets reworked.
     running_ = false;
+    reaper_.stop();
     close(listen_fd_);
 }
 
