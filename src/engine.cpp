@@ -49,7 +49,11 @@ Engine::Engine(const std::string& db_path, RetryPolicy policy)
         "id INTEGER PRIMARY KEY, queue TEXT, payload TEXT, priority INTEGER, "
         "status INTEGER, attempts INTEGER, lease_expires_at INTEGER, "
         "run_after INTEGER, created_at INTEGER);"
-        "CREATE INDEX IF NOT EXISTS idx_claim ON jobs(queue, status, run_after, priority);";
+        "DROP INDEX IF EXISTS idx_claim;"
+        "CREATE INDEX IF NOT EXISTS idx_ready "
+        "ON jobs(queue, priority DESC, id, run_after) WHERE status = 0;"
+        "CREATE INDEX IF NOT EXISTS idx_leased "
+        "ON jobs(lease_expires_at) WHERE status = 1;";
     if (sqlite3_exec(db_, schema_sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_close(db_);
@@ -106,8 +110,17 @@ std::optional<Job> Engine::claim(const std::string& queue, int64_t lease_ms) {
     // LIMIT 1 to pick deterministically), set status = Leased,
     // attempts = attempts + 1, lease_expires_at = now + lease_ms, and
     // RETURNING every column you need to build a Job.
+    // status = 0 (Ready) is a LITERAL, not a bound parameter, on purpose:
+    // idx_ready is a partial index (WHERE status = 0), and SQLite can
+    // only match a query against a partial index if the query's WHERE
+    // clause contains the same condition as a literal/constant -- a
+    // bound parameter's value isn't known at prepare time, so the
+    // planner can't prove the partial index covers it and falls back to
+    // idx_claim (or a full scan) instead. This is why this specific `= 0`
+    // must stay literal even though every other status comparison in
+    // this file is (correctly, normally) a bound parameter.
     const char* sql = "UPDATE jobs SET status = ?, attempts = attempts + 1, lease_expires_at = ? "
-                      "WHERE id = (SELECT id FROM jobs WHERE queue = ? AND status = ? AND run_after <= ? "
+                      "WHERE id = (SELECT id FROM jobs WHERE queue = ? AND status = 0 AND run_after <= ? "
                       "ORDER BY priority DESC, id ASC LIMIT 1) "
                       "RETURNING id, queue, payload, priority, status, attempts, lease_expires_at, run_after, created_at;";
     sqlite3_stmt* stmt = nullptr;
@@ -120,8 +133,7 @@ std::optional<Job> Engine::claim(const std::string& queue, int64_t lease_ms) {
     sqlite3_bind_int(stmt, 1, static_cast<int>(JobStatus::Leased));
     sqlite3_bind_int64(stmt, 2, now + lease_ms);
     sqlite3_bind_text(stmt, 3, queue.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 4, static_cast<int>(JobStatus::Ready));
-    sqlite3_bind_int64(stmt, 5, now);
+    sqlite3_bind_int64(stmt, 4, now);
 
     (void)now;
     (void)queue;
@@ -270,14 +282,16 @@ int Engine::reap_expired_leases() {
     // ids/attempts -- don't act on them yet. We finalize this SELECT before
     // running any UPDATE against the same connection, so we're never
     // mutating the table while a cursor is still open over it.
-    static const char* select_sql = "SELECT id, attempts FROM jobs WHERE status = ? AND lease_expires_at < ?;";
+    // status = 1 (Leased) is a literal for the same reason as claim()'s
+    // status = 0 above -- idx_leased is a partial index (WHERE status =
+    // 1), and a bound parameter can't be matched against it.
+    static const char* select_sql = "SELECT id, attempts FROM jobs WHERE status = 1 AND lease_expires_at < ?;";
     sqlite3_stmt* select_stmt = nullptr;
     if (sqlite3_prepare_v2(db_, select_sql, -1, &select_stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error("Failed to prepare reap select statement: " +
                                   std::string(sqlite3_errmsg(db_)));
     }
-    sqlite3_bind_int(select_stmt, 1, static_cast<int>(JobStatus::Leased));
-    sqlite3_bind_int64(select_stmt, 2, now_ms());
+    sqlite3_bind_int64(select_stmt, 1, now_ms());
 
     std::vector<std::pair<int64_t, int>> expired;
     while (sqlite3_step(select_stmt) == SQLITE_ROW) {
