@@ -29,6 +29,12 @@ static nlohmann::json ack_nack_response(bool success) {
 nlohmann::json dispatch(const nlohmann::json& req, Engine& engine) {
     std::string cmd = req.at("cmd");
 
+    if (cmd == "ping") {
+        // Touches no database -- for measuring the protocol/network
+        // ceiling in isolation from SQLite.
+        return {{"ok", true}};
+    }
+
     if (cmd == "enqueue") {
         int64_t id = engine.enqueue(req.at("queue").get<std::string>(),
                                      req.at("payload").get<std::string>(),
