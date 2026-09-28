@@ -19,8 +19,27 @@ constexpr auto kMaxReconnectBackoff = std::chrono::milliseconds(5000);
 
 void worker_loop(const std::string& host, uint16_t port, const std::string& queue,
                   int64_t job_ms, int64_t lease_ms) {
-    auto conn = std::make_unique<ClientConnection>(host, port);
     auto reconnect_backoff = kInitialReconnectBackoff;
+
+    // Retries until a connection succeeds -- a single failed attempt
+    // (broker still restarting, not back up yet) must not give up after
+    // one try, or the doubling-backoff schedule below would be pointless.
+    auto reconnect = [&]() -> std::unique_ptr<ClientConnection> {
+        for (;;) {
+            try {
+                auto new_conn = std::make_unique<ClientConnection>(host, port);
+                reconnect_backoff = kInitialReconnectBackoff;  // reset on success
+                return new_conn;
+            } catch (const std::exception& ex) {
+                std::cerr << "worker: reconnect attempt failed (" << ex.what()
+                          << "), retrying in " << reconnect_backoff.count() << "ms\n";
+                std::this_thread::sleep_for(reconnect_backoff);
+                reconnect_backoff = std::min(reconnect_backoff * 2, kMaxReconnectBackoff);
+            }
+        }
+    };
+
+    auto conn = reconnect();
 
     for (;;) {
         nlohmann::json claim_resp;
@@ -31,13 +50,10 @@ void worker_loop(const std::string& host, uint16_t port, const std::string& queu
             // Connection died before we held anything -- nothing to drop,
             // just reconnect and try again.
             std::cerr << "worker: connection error during claim (" << ex.what()
-                      << "), reconnecting in " << reconnect_backoff.count() << "ms\n";
-            std::this_thread::sleep_for(reconnect_backoff);
-            reconnect_backoff = std::min(reconnect_backoff * 2, kMaxReconnectBackoff);
-            conn = std::make_unique<ClientConnection>(host, port);
+                      << "), reconnecting\n";
+            conn = reconnect();
             continue;
         }
-        reconnect_backoff = kInitialReconnectBackoff;  // reset after a successful round-trip
 
         if (!claim_resp.at("ok").get<bool>()) {
             throw std::runtime_error("claim failed");
@@ -64,14 +80,10 @@ void worker_loop(const std::string& host, uint16_t port, const std::string& queu
             // lease expired. Drop it and move on; the lease reaper will
             // eventually reclaim it if the ack never went through.
             std::cerr << "worker: connection error while acking job " << job_id << " ("
-                      << ex.what() << "), dropping it and reconnecting in "
-                      << reconnect_backoff.count() << "ms\n";
-            std::this_thread::sleep_for(reconnect_backoff);
-            reconnect_backoff = std::min(reconnect_backoff * 2, kMaxReconnectBackoff);
-            conn = std::make_unique<ClientConnection>(host, port);
+                      << ex.what() << "), dropping it and reconnecting\n";
+            conn = reconnect();
             continue;
         }
-        reconnect_backoff = kInitialReconnectBackoff;
 
         if (!ack_resp.at("ok").get<bool>()) {
             throw std::runtime_error("ack failed");
