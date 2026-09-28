@@ -1,0 +1,42 @@
+measurement,configuration,stat,value
+raw_fsync,4KB_write_fsync,p50_ms,4.85893
+raw_fsync,4KB_write_fsync,p99_ms,7.5044
+commit_loop,PRAGMA synchronous=FULL;,median_commits_per_sec,438.4
+commit_loop,PRAGMA synchronous=FULL;,min_commits_per_sec,428.6
+commit_loop,PRAGMA synchronous=FULL;,max_commits_per_sec,442.4
+commit_loop,PRAGMA synchronous=NORMAL;,median_commits_per_sec,19238.7
+commit_loop,PRAGMA synchronous=NORMAL;,min_commits_per_sec,18910.4
+commit_loop,PRAGMA synchronous=NORMAL;,max_commits_per_sec,20859.9
+commit_loop,PRAGMA synchronous=OFF;,median_commits_per_sec,76333.8
+commit_loop,PRAGMA synchronous=OFF;,min_commits_per_sec,76169.7
+commit_loop,PRAGMA synchronous=OFF;,max_commits_per_sec,76649
+lifecycle_unbatched,PRAGMA synchronous=FULL;,median_jobs_per_sec,135.9
+lifecycle_unbatched,PRAGMA synchronous=FULL;,min_jobs_per_sec,134.3
+lifecycle_unbatched,PRAGMA synchronous=FULL;,max_jobs_per_sec,136.8
+lifecycle_unbatched,PRAGMA synchronous=NORMAL;,median_jobs_per_sec,4295.9
+lifecycle_unbatched,PRAGMA synchronous=NORMAL;,min_jobs_per_sec,4229
+lifecycle_unbatched,PRAGMA synchronous=NORMAL;,max_jobs_per_sec,4375.1
+lifecycle_batched,PRAGMA synchronous=FULL; K=1,median_jobs_per_sec,140.6
+lifecycle_batched,PRAGMA synchronous=FULL; K=1,min_jobs_per_sec,135.8
+lifecycle_batched,PRAGMA synchronous=FULL; K=1,max_jobs_per_sec,150.7
+lifecycle_batched,PRAGMA synchronous=FULL; K=10,median_jobs_per_sec,1105
+lifecycle_batched,PRAGMA synchronous=FULL; K=10,min_jobs_per_sec,1072
+lifecycle_batched,PRAGMA synchronous=FULL; K=10,max_jobs_per_sec,1145
+lifecycle_batched,PRAGMA synchronous=FULL; K=50,median_jobs_per_sec,3345
+lifecycle_batched,PRAGMA synchronous=FULL; K=50,min_jobs_per_sec,3250
+lifecycle_batched,PRAGMA synchronous=FULL; K=50,max_jobs_per_sec,3525
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=1,median_jobs_per_sec,4159
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=1,min_jobs_per_sec,4144.1
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=1,max_jobs_per_sec,4277.4
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=10,median_jobs_per_sec,9506
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=10,min_jobs_per_sec,9017
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=10,max_jobs_per_sec,10763
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=50,median_jobs_per_sec,12425
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=50,min_jobs_per_sec,10740
+lifecycle_batched,PRAGMA synchronous=NORMAL; K=50,max_jobs_per_sec,13030
+concurrency,threads=1,total_jobs_per_sec,125.7
+concurrency,threads=1,busy_retries,0
+concurrency,threads=4,total_jobs_per_sec,172.6
+concurrency,threads=4,busy_retries,3
+concurrency,threads=8,total_jobs_per_sec,185.5
+concurrency,threads=8,busy_retries,9

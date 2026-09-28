@@ -77,4 +77,22 @@ if(UNIX)
         nlohmann_json::nlohmann_json
         Threads::Threads
     )
+
+    # Raw SQLite C API benchmark -- links sqlite3 directly, not
+    # jobqueue_engine, since the whole point is measuring the SQL/pragma
+    # calls in isolation (copied verbatim from src/engine.cpp) without
+    # the Engine class or network layer in between.
+    add_executable(bench_raw_sqlite
+        bench/raw_sqlite.cpp
+    )
+    target_include_directories(bench_raw_sqlite PRIVATE
+        ${SQLITE3_INCLUDE_DIRS}
+    )
+    target_link_libraries(bench_raw_sqlite PRIVATE
+        ${SQLITE3_LIBRARIES}
+        Threads::Threads
+    )
+    target_compile_options(bench_raw_sqlite PRIVATE
+        ${SQLITE3_CFLAGS_OTHER}
+    )
 endif()

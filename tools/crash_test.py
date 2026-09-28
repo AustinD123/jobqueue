@@ -26,6 +26,7 @@ Requires `broker` and `worker` already built (cmake --build build_linux).
 """
 import json
 import random
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -106,15 +107,58 @@ def wait_for_drain(timeout_s: float = DRAIN_TIMEOUT_S) -> bool:
     return False
 
 
-def verify(ledger_ids: list[int], db_path: str) -> list[str]:
-    """TODO: compare the ledger (job ids the producer was actually told
-    "ok":true for) against the database's final state and return a list
-    of human-readable violation descriptions. Empty list = no violations
-    found. E.g.: a ledger id with no matching row in `jobs` at all would
-    mean an acknowledged enqueue was lost across a crash -- that's the
-    core property this harness exists to catch. Decide what else counts.
+def verify(ledger_ids: set[int], db_path: str) -> list[str]:
+    """Compares the ledger (job ids the broker actually returned "ok":true
+    for on enqueue) against the database's final state. Returns a list of
+    human-readable violation descriptions; an empty list means everything
+    held.
     """
-    return []
+    violations: list[str] = []
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT id, status, attempts FROM jobs").fetchall()
+    finally:
+        conn.close()
+
+    status_names = {0: "ready", 1: "leased", 2: "done", 3: "dead"}
+    status_by_id: dict[int, str] = {}
+    counts_by_status = {"ready": 0, "leased": 0, "done": 0, "dead": 0}
+    re_executed = 0
+
+    for job_id, status, attempts in rows:
+        name = status_names.get(status, f"unknown({status})")
+        status_by_id[job_id] = name
+        counts_by_status[name] = counts_by_status.get(name, 0) + 1
+        if attempts > 1:
+            re_executed += 1
+
+    # 1. Every enqueue the broker acknowledged must exist in the DB.
+    for job_id in sorted(ledger_ids):
+        if job_id not in status_by_id:
+            violations.append(f"job {job_id} was acked by the broker but is missing from the DB")
+
+    # 2. Nothing should still be leased after the drain.
+    for job_id in sorted(jid for jid, name in status_by_id.items() if name == "leased"):
+        violations.append(f"job {job_id} stuck in leased state")
+
+    # 3. Nothing should still be ready after the drain -- cap the listing
+    # at 20 individual entries and summarize the rest.
+    ready_ids = sorted(jid for jid, name in status_by_id.items() if name == "ready")
+    for job_id in ready_ids[:20]:
+        violations.append(f"job {job_id} still ready after drain")
+    if len(ready_ids) > 20:
+        violations.append(f"... and {len(ready_ids) - 20} more jobs still ready after drain")
+
+    # 4. Informational only -- at-least-once delivery allows re-execution.
+    print(f"re-executed: {re_executed} jobs")
+
+    # 5. Summary.
+    print(f"ledger size: {len(ledger_ids)}")
+    print(f"total rows in DB: {len(rows)}")
+    print(f"counts by status: {counts_by_status}")
+
+    return violations
 
 
 def main() -> int:
@@ -127,6 +171,7 @@ def main() -> int:
     broker_proc = start_broker()
     worker_procs = start_workers(NUM_WORKERS)
     print(f"broker pid {broker_proc.pid}, {NUM_WORKERS} workers started")
+    workers_alive_start = sum(1 for p in worker_procs if p.poll() is None)
 
     stop_event = threading.Event()
     ledger_file = open(LEDGER_PATH, "a")
@@ -159,6 +204,8 @@ def main() -> int:
     drained = wait_for_drain()
     print("drained cleanly" if drained else f"did not drain within {DRAIN_TIMEOUT_S}s")
 
+    workers_alive_end = sum(1 for p in worker_procs if p.poll() is None)
+
     for p in worker_procs:
         p.kill()
     broker_proc.kill()
@@ -166,8 +213,10 @@ def main() -> int:
         p.wait()
     broker_proc.wait()
 
-    ledger_ids = [int(line) for line in LEDGER_PATH.read_text().splitlines() if line.strip()]
-    print(f"\nledger: {len(ledger_ids)} acknowledged enqueues")
+    print(f"\nworker processes alive: {workers_alive_start} at start, {workers_alive_end} at end")
+
+    ledger_ids = {int(line) for line in LEDGER_PATH.read_text().splitlines() if line.strip()}
+    print(f"ledger: {len(ledger_ids)} acknowledged enqueues")
 
     violations = verify(ledger_ids, str(DB_PATH))
     if violations:
@@ -176,7 +225,7 @@ def main() -> int:
             print(f"  - {v}")
         return 1
 
-    print("verify() reported no violations (note: verify() is still a stub -- fill it in)")
+    print("verify() reported no violations")
     return 0
 
 
