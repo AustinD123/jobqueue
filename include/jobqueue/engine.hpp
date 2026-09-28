@@ -38,8 +38,8 @@ public:
     int64_t enqueue(const std::string& queue, const std::string& payload,
                      int priority = 0);
     std::optional<Job> claim(const std::string& queue, int64_t lease_ms);
-    bool ack(int64_t job_id);
-    bool nack(int64_t job_id);
+    bool ack(int64_t job_id, int attempt);
+    bool nack(int64_t job_id, int attempt);
     int reap_expired_leases();
 
     struct Stats { int64_t ready, leased, dead, done; };

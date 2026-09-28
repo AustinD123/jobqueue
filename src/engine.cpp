@@ -155,12 +155,14 @@ std::optional<Job> Engine::claim(const std::string& queue, int64_t lease_ms) {
     return result;
 }
 
-bool Engine::ack(int64_t job_id) {
-    // TODO: UPDATE jobs SET status = Done WHERE id = ? AND status = Leased
-    // Check sqlite3_changes(db_) after step — 0 means this job wasn't
-    // leased (already acked, or its lease already expired and got
-    // reclaimed by someone else) — that's your `false` case.
-    const char* sql = "UPDATE jobs SET status = ? WHERE id = ? AND status = ?;";
+bool Engine::ack(int64_t job_id, int attempt) {
+    // Fencing token: `attempt` must match the row's CURRENT attempts
+    // value, not just id+status. Guards against a worker whose lease
+    // already expired (reaped and reclaimed by someone else, attempts
+    // bumped again by that new claim) coming back late and acking --
+    // without this, that stale ack would mark the NEW claimant's job
+    // Done out from under them, even though status=Leased still matches.
+    const char* sql = "UPDATE jobs SET status = ? WHERE id = ? AND status = ? AND attempts = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error("Failed to prepare ack statement: " +
@@ -170,6 +172,7 @@ bool Engine::ack(int64_t job_id) {
     sqlite3_bind_int(stmt, 1, static_cast<int>(JobStatus::Done));
     sqlite3_bind_int64(stmt, 2, job_id);
     sqlite3_bind_int(stmt, 3, static_cast<int>(JobStatus::Leased));
+    sqlite3_bind_int(stmt, 4, attempt);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_finalize(stmt);
@@ -181,17 +184,14 @@ bool Engine::ack(int64_t job_id) {
     return changed;
 }
 
-bool Engine::nack(int64_t job_id) {
-    // Step 1: read attempts, but only for a row this caller still owns
-    // (status = Leased). This SELECT-then-UPDATE is safe here in a way it
-    // was NOT safe in claim(): nobody else can be racing us for a job
-    // that's already Leased to us specifically -- the only other actor
-    // that could touch this row is the reaper, if our lease already
-    // expired between claim() and now. The final UPDATE's own
-    // "AND status = Leased" guard (checked via sqlite3_changes) catches
-    // that case: if the reaper already moved it, our UPDATE matches 0
-    // rows and we correctly report false, same as ack().
-    const char* select_sql = "SELECT attempts FROM jobs WHERE id = ? AND status = ?;";
+bool Engine::nack(int64_t job_id, int attempt) {
+    // Step 1: confirm this row is still owned by THIS fencing token --
+    // status = Leased AND attempts = the caller's `attempt`, not just
+    // id+status. Same reasoning as ack(): a worker whose lease already
+    // expired and got reclaimed (attempts bumped again by the new
+    // claimant) must not be able to nack the new claimant's attempt out
+    // from under them just because the row still happens to say Leased.
+    const char* select_sql = "SELECT id FROM jobs WHERE id = ? AND status = ? AND attempts = ?;";
     sqlite3_stmt* select_stmt = nullptr;
     if (sqlite3_prepare_v2(db_, select_sql, -1, &select_stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error("Failed to prepare nack select statement: " +
@@ -199,25 +199,25 @@ bool Engine::nack(int64_t job_id) {
     }
     sqlite3_bind_int64(select_stmt, 1, job_id);
     sqlite3_bind_int(select_stmt, 2, static_cast<int>(JobStatus::Leased));
+    sqlite3_bind_int(select_stmt, 3, attempt);
 
     const int select_rc = sqlite3_step(select_stmt);
     if (select_rc == SQLITE_DONE) {
         sqlite3_finalize(select_stmt);
-        return false;  // not currently leased to anyone -- nothing to nack
+        return false;  // not leased to this fencing token -- stale caller
     }
     if (select_rc != SQLITE_ROW) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_finalize(select_stmt);
         throw std::runtime_error("Failed to read job for nack: " + err);
     }
-    const int attempts = sqlite3_column_int(select_stmt, 0);
     sqlite3_finalize(select_stmt);
 
     // Branch on attempts (already incremented back in claim()) vs the
     // retry policy, and apply the matching UPDATE -- shared with
     // reap_expired_leases(), which faces the exact same decision for a
     // batch of rows instead of one.
-    return transition_after_failure(job_id, attempts);
+    return transition_after_failure(job_id, attempt);
 }
 
 // Applies the Dead-vs-Ready+backoff decision to a single row that the
@@ -230,7 +230,8 @@ bool Engine::nack(int64_t job_id) {
 bool Engine::transition_after_failure(int64_t job_id, int current_attempts) {
     sqlite3_stmt* update_stmt = nullptr;
     if (current_attempts >= policy_.max_attempts) {
-        const char* dead_sql = "UPDATE jobs SET status = ? WHERE id = ? AND status = ?;";
+        const char* dead_sql =
+            "UPDATE jobs SET status = ? WHERE id = ? AND status = ? AND attempts = ?;";
         if (sqlite3_prepare_v2(db_, dead_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
             throw std::runtime_error("Failed to prepare dead-transition statement: " +
                                       std::string(sqlite3_errmsg(db_)));
@@ -238,9 +239,10 @@ bool Engine::transition_after_failure(int64_t job_id, int current_attempts) {
         sqlite3_bind_int(update_stmt, 1, static_cast<int>(JobStatus::Dead));
         sqlite3_bind_int64(update_stmt, 2, job_id);
         sqlite3_bind_int(update_stmt, 3, static_cast<int>(JobStatus::Leased));
+        sqlite3_bind_int(update_stmt, 4, current_attempts);
     } else {
         const char* retry_sql =
-            "UPDATE jobs SET status = ?, run_after = ? WHERE id = ? AND status = ?;";
+            "UPDATE jobs SET status = ?, run_after = ? WHERE id = ? AND status = ? AND attempts = ?;";
         if (sqlite3_prepare_v2(db_, retry_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
             throw std::runtime_error("Failed to prepare retry-transition statement: " +
                                       std::string(sqlite3_errmsg(db_)));
@@ -249,6 +251,7 @@ bool Engine::transition_after_failure(int64_t job_id, int current_attempts) {
         sqlite3_bind_int64(update_stmt, 2, now_ms() + backoff_for_attempt(current_attempts));
         sqlite3_bind_int64(update_stmt, 3, job_id);
         sqlite3_bind_int(update_stmt, 4, static_cast<int>(JobStatus::Leased));
+        sqlite3_bind_int(update_stmt, 5, current_attempts);
     }
 
     if (sqlite3_step(update_stmt) != SQLITE_DONE) {

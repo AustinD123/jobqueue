@@ -44,11 +44,13 @@ nlohmann::json dispatch(const nlohmann::json& req, Engine& engine) {
     }
 
     if (cmd == "ack") {
-        return ack_nack_response(engine.ack(req.at("job_id").get<int64_t>()));
+        return ack_nack_response(engine.ack(req.at("job_id").get<int64_t>(),
+                                             req.at("attempt").get<int>()));
     }
 
     if (cmd == "nack") {
-        return ack_nack_response(engine.nack(req.at("job_id").get<int64_t>()));
+        return ack_nack_response(engine.nack(req.at("job_id").get<int64_t>(),
+                                              req.at("attempt").get<int>()));
     }
 
     if (cmd == "stats") {

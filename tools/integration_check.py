@@ -23,10 +23,17 @@ needs updating to match (or tell me and I'll update it):
                           "status":..,"attempts":..,...}}   (job present)
     -> {"ok":true,"job":null}                                (queue empty)
 
-  {"cmd":"ack","job_id":<int>}  -> {"ok":true} on success,
+  {"cmd":"ack","job_id":<int>,"attempt":<int>}  -> {"ok":true} on success,
                                     {"ok":false,"error":".."} if the job
-                                    wasn't leased / already resolved
-  {"cmd":"nack","job_id":<int>} -> same shape as ack
+                                    wasn't leased under that exact
+                                    fencing token (attempt), or already
+                                    resolved
+  {"cmd":"nack","job_id":<int>,"attempt":<int>} -> same shape as ack
+
+  "attempt" is the fencing token: the `attempts` value from the job as
+  returned by claim() -- required on every ack/nack, and must match the
+  job's CURRENT attempts count. A stale attempt (e.g. from a lease that
+  already expired and got reclaimed by someone else) is rejected.
 
   {"cmd":"stats","queue":<str>}
     -> {"ok":true,"ready":..,"leased":..,"done":..,"dead":..}  (flat,
@@ -116,8 +123,9 @@ def run_enqueue_claim_resolve(port: int, queue: str, resolve_cmd: str, label: st
     job = claim_resp.get("job") or {}
     check(f"[{label}] claimed job payload matches enqueued payload",
           job.get("payload") == payload, job.get("payload"), payload)
+    attempt = job.get("attempts")
 
-    resolve_resp = rpc(port, {"cmd": resolve_cmd, "job_id": job_id})
+    resolve_resp = rpc(port, {"cmd": resolve_cmd, "job_id": job_id, "attempt": attempt})
     check(f"[{label}] {resolve_cmd} succeeded", resolve_resp.get("ok") is True,
           resolve_resp, {"ok": True})
 
@@ -167,7 +175,8 @@ def main() -> int:
             job = claim_resp.get("job") or {}
             check(f"[dead-path] attempt {attempt}: claimed the same job",
                   job.get("id") == job_id, job.get("id"), job_id)
-            nack_resp = rpc(args.port, {"cmd": "nack", "job_id": job_id})
+            nack_resp = rpc(args.port, {"cmd": "nack", "job_id": job_id,
+                                         "attempt": job.get("attempts")})
             check(f"[dead-path] attempt {attempt}: nack succeeded",
                   nack_resp.get("ok") is True, nack_resp, {"ok": True})
 

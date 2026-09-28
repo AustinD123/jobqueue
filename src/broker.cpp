@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 
@@ -71,7 +72,21 @@ void Broker::stop() {
 void Broker::handle_connection(int client_fd) {
     // Own connection, per our connection-per-thread design -- not shared
     // with the accept loop's thread or any other connection's thread.
-    Engine engine(db_path_, policy_);
+    // Constructing it can throw (e.g. the SQLite busy-lock race under
+    // concurrent connection setup) -- same reasoning as the dispatch()
+    // try/catch below: an exception escaping a std::thread's entry
+    // function is fatal to the whole process, not just this connection,
+    // so this needs its own guard, not just the request loop's.
+    std::unique_ptr<Engine> engine;
+    try {
+        engine = std::make_unique<Engine>(db_path_, policy_);
+    } catch (const std::exception& ex) {
+        nlohmann::json response = {{"ok", false}, {"error", ex.what()}};
+        std::string out = response.dump() + "\n";
+        send(client_fd, out.c_str(), out.size(), 0);
+        close(client_fd);
+        return;
+    }
 
     std::string buffer;
     char chunk[4096];
@@ -88,17 +103,16 @@ void Broker::handle_connection(int client_fd) {
             std::string line = buffer.substr(0, newline);
             buffer.erase(0, newline + 1);
 
-            // dispatch() is a stub that always throws right now (and any
-            // future implementation can throw on bad input) -- an
-            // exception escaping a std::thread's entry function calls
-            // std::terminate and takes down the whole broker process, not
-            // just this connection, so every request is answered with
-            // either a real response or an error response, never left to
-            // propagate.
+            // dispatch() can throw on bad input (missing fields, unknown
+            // command, etc.) -- an exception escaping a std::thread's
+            // entry function calls std::terminate and takes down the
+            // whole broker process, not just this connection, so every
+            // request is answered with either a real response or an
+            // error response, never left to propagate.
             nlohmann::json response;
             try {
                 nlohmann::json request = nlohmann::json::parse(line);
-                response = dispatch(request, engine);
+                response = dispatch(request, *engine);
             } catch (const std::exception& ex) {
                 response = {{"ok", false}, {"error", ex.what()}};
             }
