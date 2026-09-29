@@ -1,0 +1,13 @@
+.git
+build/
+build_linux/
+cli/
+tools/
+bench/results/
+**/__pycache__/
+*.db
+*.db-wal
+*.db-shm
+Dockerfile
+docker-compose.yml
+.dockerignore
