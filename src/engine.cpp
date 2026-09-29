@@ -1,7 +1,9 @@
 #include "jobqueue/engine.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -39,7 +41,20 @@ Engine::Engine(const std::string& db_path, RetryPolicy policy)
         sqlite3_close(db_);
         throw std::runtime_error("Failed to set journal_mode: " + err);
     }
-    if (sqlite3_exec(db_, "PRAGMA synchronous=FULL;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    // JQ_SYNC_MODE lets a deployment trade durability for throughput
+    // (NORMAL in WAL mode can lose the last commits on power loss, but
+    // never corrupts). Whitelisted because it's spliced into SQL text --
+    // pragmas can't take bound parameters. Unset/unknown -> FULL.
+    std::string sync_mode = "FULL";
+    if (const char* env = std::getenv("JQ_SYNC_MODE")) {
+        std::string v = env;
+        std::transform(v.begin(), v.end(), v.begin(), ::toupper);
+        if (v == "OFF" || v == "NORMAL" || v == "FULL" || v == "EXTRA") {
+            sync_mode = v;
+        }
+    }
+    std::string sync_sql = "PRAGMA synchronous=" + sync_mode + ";";
+    if (sqlite3_exec(db_, sync_sql.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK) {
         std::string err = sqlite3_errmsg(db_);
         sqlite3_close(db_);
         throw std::runtime_error("Failed to set synchronous: " + err);

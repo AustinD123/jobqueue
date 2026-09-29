@@ -1,0 +1,48 @@
+services:
+  broker:
+    build: .
+    image: jobqueue:latest
+    command: ["9000"]
+    environment:
+      JQ_DB_PATH: /data/jobqueue.db
+      # Passed straight through to PRAGMA synchronous (OFF/NORMAL/FULL/EXTRA);
+      # unset or unrecognized falls back to FULL.
+      JQ_SYNC_MODE: ${JQ_SYNC_MODE:-FULL}
+    volumes:
+      - jobqueue-data:/data
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+    # tini as PID 1: broker/worker install no SIGTERM handler, and a bare
+    # PID 1 ignores it, so `compose down` would otherwise wait out the 10s
+    # grace period and SIGKILL anyway.
+    init: true
+    # Runtime image has no python/nc; bash's /dev/tcp is enough to send one
+    # protocol line and check the reply.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/9000 && echo "{\"cmd\":\"ping\"}" >&3 && read -t 2 -r reply <&3 && [[ $$reply == *"\"ok\":true"* ]]'
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  worker:
+    image: jobqueue:latest
+    pull_policy: never  # built by the broker service; same image
+    entrypoint: ["worker"]
+    command: ["--host", "broker", "--port", "9000"]
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+    # tini as PID 1: broker/worker install no SIGTERM handler, and a bare
+    # PID 1 ignores it, so `compose down` would otherwise wait out the 10s
+    # grace period and SIGKILL anyway.
+    init: true
+
+volumes:
+  jobqueue-data:
